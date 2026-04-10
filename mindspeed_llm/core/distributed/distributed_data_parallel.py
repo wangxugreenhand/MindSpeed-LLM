@@ -4,6 +4,7 @@
 from typing import Optional
 from functools import wraps
 import torch
+import torch.distributed as dist
 from megatron.training import get_args
 from megatron.core import parallel_state
 from megatron.core.transformer.module import MegatronModule
@@ -22,10 +23,19 @@ def distributed_data_parallel_init(
     expert_data_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
     disable_bucketing: bool = False,
     check_for_nan_in_grad: bool = False,
-    bucket_size: int = 40000000
+    bucket_size: int = 40000000,
+    use_gmc: bool = False,
+    gmc_compression_strategy: str = "topk",
+    gmc_sparsity_rate: float = 1.0 / 2048,
+    gmc_beta: float = 0.9,
 ):
     MegatronModule.__init__(self, config=config)
     self.module = module
+    if torch.distributed.is_initialized():
+        if torch.distributed.get_rank() == 0:
+            print('DDP initialized in MindSpeed.', flush=True)
+    else:
+        print('DDP initialized in MindSpeed.', flush=True)
 
     # Set bucket_size to infinity if overlap_grad_reduce is False.
     self.overlap_grad_reduce = overlap_grad_reduce
@@ -48,6 +58,41 @@ def distributed_data_parallel_init(
 
     self.module = module
     self.param_to_buffer = {}
+    # add gmc config
+    self.param_to_name_ = {}
+    # GMC related configs
+    self.gmc_error = None
+    self.gmc_diff = None
+    self.beta = gmc_beta
+    self.gmc_sparse = gmc_sparsity_rate
+    self.lr = None
+    self.wd = None
+    self.gmc_compression_strategy = gmc_compression_strategy
+    # confire server-clinet's gloabal_rank
+    self.data_parallel_group = parallel_state.get_data_parallel_group(with_context_parallel=True)
+    self.data_parallel_world_size = parallel_state.get_data_parallel_world_size(with_context_parallel=True)
+    self.global_rank = dist.get_rank()
+    self.local_rank = parallel_state.get_data_parallel_rank(with_context_parallel=True)
+    # Determine server rank
+    self.server_rank = None
+    self.woker_list = None
+
+    if self.use_gmc:
+        self.bucket_size = None # 计算与通信不重叠
+        # Determine server rank
+        self.server_rank = torch.tensor(self.global_rank, device=torch.cuda.current_device())
+        dist.all_reduce(self.server_rank, op=dist.ReduceOp.MIN, group=self.data_parallel_group)
+        self.server_rank = int(self.server_rank.item())
+        if self.is_server():
+            self.worker_list = []
+            for i in range(self.data_parallel_world_size):
+                self.worker_list.append(torch.zeros(1, dtype=torch.long).to(torch.cuda.current_device()))
+        rank_to_send = torch.tensor([self.global_rank],device=torch.cuda.current_device())
+        dist.gather(rank_to_send, self.worker_list, dst=self.server_rank, group=self.data_parallel_group)
+
+        if self.is_server():
+            self.worker_list = [rank.item() for rank in self.worker_list]
+    
 
     # Group parameters by their gradient type.
     param_to_name = {}
@@ -59,6 +104,7 @@ def distributed_data_parallel_init(
 
         param.grad_added_to_main_grad = False
         param_to_name[param] = name
+        self.param_to_name_[param] = name
 
         if getattr(param, 'allreduce', True):
             dense_params.append(param)
@@ -153,6 +199,7 @@ def distributed_data_parallel_init_wrapper(fn):
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
         argument = get_args()
+        # print(f"Distributed Data Parallel Init Wrapper: enable_high_availability={argument.enable_high_availability}")
         if argument.enable_high_availability:
             distributed_data_parallel_init(self, *args, **kwargs)
         else:

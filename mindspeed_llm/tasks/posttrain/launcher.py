@@ -3,7 +3,7 @@ import logging
 
 from megatron.training import get_args
 from megatron.training.initialize import initialize_megatron
-from mindspeed_llm.tasks.posttrain.sft import SFTTrainer
+from mindspeed_llm.tasks.posttrain.sft import SFTTrainer, ViTSFTTrainer
 from mindspeed_llm.tasks.posttrain.dpo import DPOTrainer
 from mindspeed_llm.tasks.posttrain.orm import ORMTrainer
 from mindspeed_llm.tasks.posttrain.prm import PRMTrainer
@@ -22,6 +22,8 @@ def get_trainer(stage):
     """
     if stage == "sft":
         return SFTTrainer()
+    if stage == "sft_vit":
+        return ViTSFTTrainer()
     elif stage == "dpo":
         return DPOTrainer()
     elif stage == "orm":

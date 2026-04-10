@@ -3,9 +3,9 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 mkdir ./finetune_dataset
 
 python ./preprocess_data.py \
-    --input ./dataset/train-00000-of-00001-a09b74b3ef9c3b56.parquet \
-    --tokenizer-name-or-path ./model_from_hf/qwen3_hf/ \
-    --output-prefix ./finetune_dataset/alpaca \
+    --input ../alpaca_en/alpaca_data_en_52k.json \
+    --tokenizer-name-or-path ../Qwen3-8B \
+    --output-prefix ./finetune_dataset/alpaca_en \
     --handler-name AlpacaStyleInstructionHandler \
     --tokenizer-type PretrainedFromHF \
     --workers 4 \
