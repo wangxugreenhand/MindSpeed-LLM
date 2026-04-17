@@ -7,11 +7,11 @@ python convert_ckpt.py \
     --model-type GPT \
     --load-model-type hf \
     --save-model-type mg \
-    --target-tensor-parallel-size 1 \
-    --target-pipeline-parallel-size 8 \
+    --target-tensor-parallel-size 4 \
+    --target-pipeline-parallel-size 2
     --spec mindspeed_llm.tasks.models.spec.qwen3_spec layer_spec \
-    --load-dir ./model_from_hf/qwen3_hf/ \
-    --save-dir ./model_weights/qwen3_mcore/ \
-    --tokenizer-model ./model_from_hf/qwen3_hf/tokenizer.json \
+    --load-dir ../Qwen3-8B/ \
+    --save-dir ../Qwen3-8B-mcore-tp4-pp2/ \
+    --tokenizer-model ../Qwen3-8B/tokenizer.json \
     --params-dtype bf16 \
     --model-type-hf qwen3
