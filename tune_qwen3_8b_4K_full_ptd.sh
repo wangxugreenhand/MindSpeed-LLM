@@ -11,10 +11,10 @@ NODE_RANK=0
 WORLD_SIZE=$(($NPUS_PER_NODE*$NNODES))
 
 # please fill these path configurations
-CKPT_LOAD_DIR="../Qwen3-8B-mcore-tp4-pp2"
-CKPT_SAVE_DIR="../Qwen3-8B-finetune"
+CKPT_LOAD_DIR="../../xmq_test/Qwen3-8B-mcore-tp4-pp2"
+CKPT_SAVE_DIR="../../xmq_test/Qwen3-8B-finetune"
 DATA_PATH="./finetune_dataset/alpaca_en"
-TOKENIZER_PATH="../Qwen3-8B"
+TOKENIZER_PATH="../../xmq_test/Qwen3-8B"
 
 TP=4
 PP=2

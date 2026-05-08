@@ -58,6 +58,7 @@ class Bucket:
         self,
         ddp_config: DistributedDataParallelConfig,
         params: List[torch.nn.Parameter],
+        param_dtype: torch.dtype,
         param_to_name: Dict[torch.nn.Parameter, str],
         param_index_map: Dict[torch.nn.Parameter, tuple],
         param_data: Optional[torch.Tensor],
@@ -81,6 +82,7 @@ class Bucket:
         self.params_with_grad = set()
         self.param_data = param_data
         self.grad_data = grad_data
+        self.param_dtype = param_dtype
         # The distributed optimizer needs to keep track of this bucket's offset
         # within the full grad_buffer.
         self.offset = offset
@@ -96,8 +98,8 @@ class Bucket:
         self.gmc_beta = ddp_config.gmc_beta
         self.gmc_sparse = 1.0 / ddp_config.gmc_sparsity_rate
         self.gmc_detached_coeff = ddp_config.gmc_detached_coeff
-        self.init_seed = ddp_config.gmc_compression_seed
         self.cur_iteration = 0
+        self.global_wt = None
         # 获取当下节点在张量并行、流水线并行组内的编号和大小
         self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
         self.pp_rank = parallel_state.get_pipeline_model_parallel_rank()
@@ -152,6 +154,20 @@ class Bucket:
             with torch.no_grad():
             # GMC+ compression is only supported with all-reduce, not reduce-scatter.
             # Add weight decay to gradients if needed
+                # save the weights
+                if self.global_wt is None:
+                    self.global_wt = torch.zeros(
+                        self.grad_data.shape, 
+                        dtype=self.param_dtype, 
+                        device=self.grad_data.device
+                    )
+                    for param in self.params:
+                        if not param.requires_grad:
+                            continue
+                        data_start_index, data_end_index, _ = self.param_to_index_map[param]
+                        local_start = data_start_index - self.offset
+                        local_end = data_end_index - self.offset
+                        self.global_wt[local_start:local_end] = param.data.view(-1).to(self.param_dtype)
                 # create lr and wd attributes in params in bucket
                 lr_tensor = torch.empty_like(self.grad_data)
                 wd_tensor = torch.empty_like(self.grad_data)
@@ -208,7 +224,9 @@ class Bucket:
                 self.gmc_error[mask] = 0.0
                 # update gmc_diff
                 self.gmc_diff.zero_()
-                self.gmc_diff[mask] = -1 * self.lr * sparse_values
+                self.gmc_diff[mask] = -1 * lr_tensor[mask] * sparse_values
+                # update global_wt
+                self.global_wt.add_(self.gmc_diff.to(self.param_dtype))
 
                 # update grads, thinking about the learning rate and the detached coeff
                 self.grad_data.zero_()
@@ -282,6 +300,31 @@ class Bucket:
 
     def set_idx(self, idx):
         self.idx = idx
+
+    def copy_global_wt_to_params(self) -> bool:
+        """Copy GMC+ global weights back to the original bucket parameters."""
+        if not self.ddp_config.use_gmc_plus or not hasattr(self, 'global_wt'):
+            return False
+
+        global_wt = self.global_wt
+        if global_wt is None:
+            return False
+
+        global_wt = global_wt.view(-1)
+        assert global_wt.numel() == self.grad_data.numel(), (
+            f'GMC+ global_wt size {global_wt.numel()} does not match bucket size '
+            f'{self.grad_data.numel()}'
+        )
+
+        with torch.no_grad():
+            for param in self.params:
+                data_start_index, data_end_index, _ = self.param_to_index_map[param]
+                local_start = data_start_index - self.offset
+                local_end = data_end_index - self.offset
+                param.data.detach().copy_(
+                    global_wt[local_start:local_end].view_as(param.data).to(dtype=param.data.dtype)
+                )
+        return True
 
 class ParamAndGradBuffer:
     """
@@ -596,6 +639,7 @@ class ParamAndGradBuffer:
         bucket = Bucket(
             ddp_config=self.ddp_config,
             params=bucket_params,
+            param_dtype=self.param_dtype,
             param_to_name=param_to_name,
             param_index_map=param_index_map,
             param_data=bucketed_param_data,
@@ -664,3 +708,10 @@ class ParamAndGradBuffer:
         self.idx = idx
         for i, bucket in enumerate(self.buckets):
             bucket.set_idx(i + self.idx)
+
+    def copy_global_wt_to_params(self) -> bool:
+        """Copy GMC+ global weights from all buckets back to model parameters."""
+        copied = False
+        for bucket in self.buckets:
+            copied = bucket.copy_global_wt_to_params() or copied
+        return copied

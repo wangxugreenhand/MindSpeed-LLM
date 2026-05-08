@@ -362,6 +362,13 @@ class DistributedDataParallel(MegatronModule):
         rng_bucket = np.random.RandomState(group_seed)
         bucket_seeds = rng_bucket.randint(0, 2**31 - 1, size=self.num_buckets, dtype=np.int32)
         return bucket_seeds
-
         
+    def copy_gmc_global_wt_to_params(self) -> bool:
+        """Copy GMC+ global weights from buckets back to wrapped module parameters."""
+        if not self.ddp_config.use_gmc_plus:
+            return False
 
+        copied = False
+        for buffer in self.buffers + self.expert_parallel_buffers:
+            copied = buffer.copy_global_wt_to_params() or copied
+        return copied

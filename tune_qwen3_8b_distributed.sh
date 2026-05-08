@@ -9,14 +9,14 @@ NPUS_PER_NODE=8
 MASTER_ADDR=192.168.0.119
 MASTER_PORT=6001
 NNODES=4
-NODE_RANK=1
+NODE_RANK=3
 WORLD_SIZE=$(($NPUS_PER_NODE*$NNODES))
 
 # please fill these path configurations
-CKPT_LOAD_DIR="../Qwen3-8B-mcore-tp4-pp4"
-CKPT_SAVE_DIR="../Qwen3-8B-finetune"
+CKPT_LOAD_DIR="/home/xmq_test/Qwen3-8B-mcore-tp4-pp4"
+CKPT_SAVE_DIR="./Qwen3-8B-finetune"
 DATA_PATH="./finetune_dataset/alpaca_en"
-TOKENIZER_PATH="../Qwen3-8B"
+TOKENIZER_PATH="/home/xmq_test/Qwen3-8B"
 
 TP=4
 PP=4
@@ -70,8 +70,8 @@ GPT_ARGS="
     --lr 1.25e-6 \
     --weight-decay 1e-1 \
     --clip-grad 1.0 \
-    --adam-beta1 0.9 \
-    --adam-beta2 0.95 \
+    --optimizer sgd \
+    --sgd-momentum 0.0 \
     --initial-loss-scale 4096 \
     --disable-bias-linear \
     --no-load-optim \
@@ -81,7 +81,11 @@ GPT_ARGS="
     --swiglu \
     --no-bias-swiglu-fusion \
     --no-rope-fusion \
-    --transformer-impl local
+    --transformer-impl local \
+    --use-gmc-plus \
+    --gmc-beta 0.9 \
+    --gmc-sparsity-rate 256 \
+    --gmc-detached-coeff 0.01
 "
 
 DATA_ARGS="
@@ -112,4 +116,4 @@ torchrun $DISTRIBUTED_ARGS posttrain_gpt.py \
     --distributed-backend nccl \
     --load ${CKPT_LOAD_DIR} \
     --save ${CKPT_SAVE_DIR} \
-	 2>&1 | tee "logs/tune_$(date +%Y%m%d_%H%M%S).log"
+	  2>&1 | tee "logs/tune_qwen3_8b_gmc+_$(date +%Y%m%d_%H%M%S).log"

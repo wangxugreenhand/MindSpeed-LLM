@@ -1,26 +1,25 @@
 #!/bin/bash
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
-export HCCL_CONNECT_TIMEOUT=600
+export HCCL_CONNECT_TIMEOUT=1200
 
 NPUS_PER_NODE=8
 MASTER_ADDR=localhost
-MASTER_PORT=6003
+MASTER_PORT=6001
 NNODES=1
 NODE_RANK=0
 WORLD_SIZE=$(($NPUS_PER_NODE*$NNODES))
 
 # please fill these path configurations
-CKPT_LOAD_DIR="../Qwen3-0.6B-mcore"
+CKPT_LOAD_DIR="/home/xmq_test/Qwen3-0.6B-mcore"
 CKPT_SAVE_DIR="../Qwen3-0.6B-finetune"
-DATA_PATH="./finetune_dataset/alpaca_en"
-TOKENIZER_PATH="../Qwen3-0.6B-hf"
+DATA_PATH="/home/xmq_test/MindSpeed-LLM/finetune_dataset/alpaca_en"
+TOKENIZER_PATH="/home/xmq_test/Qwen3-0.6B-hf"
 
 TP=1
 PP=4
 MBS=1
-GBS=4
+GBS=8
 
 DISTRIBUTED_ARGS="
     --nproc_per_node $NPUS_PER_NODE \
@@ -31,38 +30,46 @@ DISTRIBUTED_ARGS="
 "
 
 GPT_ARGS="
-    --transformer-impl local \
     --use-mcore-models \
     --spec mindspeed_llm.tasks.models.spec.qwen3_spec layer_spec \
+    --kv-channels 128 \
+    --qk-layernorm \
     --tensor-model-parallel-size ${TP} \
     --pipeline-model-parallel-size ${PP} \
     --num-layers 28 \
-    --hidden-size 1024 \
-    --ffn-hidden-size 3072 \
+    --hidden-size 1024  \
+    --use-rotary-position-embeddings \
     --num-attention-heads 16 \
-    --group-query-attention \
-    --num-query-groups 8 \
-    --position-embedding-type rope \
-    --kv-channels 128 \
-    --qk-layernorm \
+    --ffn-hidden-size 3072 \
     --max-position-embeddings 40960 \
-    --seq-length 512 \
+    --seq-length 4096 \
     --make-vocab-size-divisible-by 1 \
     --padded-vocab-size 151936 \
+    --rotary-base 1000000 \
     --micro-batch-size ${MBS} \
     --global-batch-size ${GBS} \
+    --disable-bias-linear \
     --train-iters 50 \
-    --init-method-std 0.01 \
     --tokenizer-type PretrainedFromHF \
     --tokenizer-name-or-path ${TOKENIZER_PATH} \
-	  --normalization RMSNorm \
+    --normalization RMSNorm \
+    --position-embedding-type rope \
+    --norm-epsilon 1e-6 \
+    --hidden-dropout 0 \
+    --attention-dropout 0 \
     --no-gradient-accumulation-fusion \
     --attention-softmax-in-fp32 \
+    --exit-on-missing-checkpoint \
     --no-masked-softmax-fusion \
+    --group-query-attention \
+    --untie-embeddings-and-output-weights \
+    --num-query-groups 8 \
     --min-lr 1.25e-7 \
     --lr 1.25e-6 \
     --weight-decay 1e-1 \
     --clip-grad 1.0 \
+    --optimizer sgd \
+    --sgd-momentum 0.0 \
     --initial-loss-scale 4096 \
     --disable-bias-linear \
     --no-load-optim \
@@ -71,7 +78,12 @@ GPT_ARGS="
     --fp16 \
     --swiglu \
     --no-bias-swiglu-fusion \
-	  --no-rope-fusion
+    --no-rope-fusion \
+    --transformer-impl local \
+    --use-gmc-plus \
+    --gmc-beta 0.9 \
+    --gmc-sparsity-rate 512 \
+    --gmc-detached-coeff 0.01
 "
 
 DATA_ARGS="
@@ -102,4 +114,4 @@ torchrun $DISTRIBUTED_ARGS posttrain_gpt.py \
     --distributed-backend nccl \
     --load ${CKPT_LOAD_DIR} \
     --save ${CKPT_SAVE_DIR} \
-	 2>&1 | tee "logs/sft_$(date +%Y%m%d_%H%M%S).log"
+	 2>&1 | tee "logs/tune_qwen3_0.6b_gmc+_$(date +%Y%m%d_%H%M%S).log"

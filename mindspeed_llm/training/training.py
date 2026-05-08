@@ -65,6 +65,55 @@ from mindspeed_llm.tasks.posttrain.lora.utils import is_enable_lora
 _TRAIN_START_TIME = time.time()
 
 
+def copy_gmc_global_wt_to_params(model):
+    """Copy GMC+ global weights back to model parameters when available."""
+    args = get_args()
+    if not getattr(args, 'use_gmc_plus', False):
+        return
+
+    for model_module in model:
+        if hasattr(model_module, 'copy_gmc_global_wt_to_params'):
+            model_module.copy_gmc_global_wt_to_params()
+
+def stash_gmc_train_params(model):
+    """Save current local training parameters before a temporary GMC+ eval swap."""
+    args = get_args()
+    if not getattr(args, 'use_gmc_plus', False):
+        return None
+
+    snapshots = []
+    for model_module in model:
+        for param in model_module.parameters():
+            if param.requires_grad:
+                snapshots.append((param, param.data.detach().clone()))
+    return snapshots
+
+
+def restore_gmc_train_params(snapshots):
+    """Restore local training parameters after temporary GMC+ eval."""
+    if snapshots is None:
+        return
+
+    with torch.no_grad():
+        for param, param_data in snapshots:
+            param.data.detach().copy_(param_data)
+
+def save_checkpoint_with_gmc_global_wt(iteration, model, optimizer, opt_param_scheduler,
+                                       num_floating_point_operations_so_far,
+                                       checkpointing_context=None):
+    """Save checkpoint with GMC+ global weights while preserving local training params."""
+    gmc_train_params = stash_gmc_train_params(model)
+    try:
+        copy_gmc_global_wt_to_params(model)
+        save_checkpoint_and_time(iteration, model, optimizer,
+                                 opt_param_scheduler,
+                                 num_floating_point_operations_so_far,
+                                 checkpointing_context=checkpointing_context)
+    finally:
+        restore_gmc_train_params(gmc_train_params)
+        gmc_train_params = None
+
+
 def update_save_checkpoint_chmod(save_path, permission=0o640):
     if os.path.exists(save_path) and os.path.isdir(save_path):
         for root, _, files in os.walk(save_path):
@@ -451,6 +500,7 @@ def pretrain(train_valid_test_dataset_provider,
         print_datetime('after training is done')
 
         if args.save and iteration != 0 and iteration % args.save_interval != 0:
+            copy_gmc_global_wt_to_params(model)
             save_checkpoint(iteration, model, optimizer, opt_param_scheduler,
                             num_floating_point_operations_so_far)
         one_logger and one_logger.log_metrics({
@@ -463,6 +513,7 @@ def pretrain(train_valid_test_dataset_provider,
 
     if args.do_valid:
         prefix = f'iteration {iteration} on validation set'
+        copy_gmc_global_wt_to_params(model)
         evaluate_and_print_results(prefix, forward_step_func,
                                    valid_data_iterator, model,
                                    iteration, process_non_loss_data_func, config,
@@ -470,6 +521,7 @@ def pretrain(train_valid_test_dataset_provider,
 
     if args.do_test:
         prefix = f'iteration {iteration} on test set'
+        copy_gmc_global_wt_to_params(model)
         evaluate_and_print_results(prefix, forward_step_func,
                                    test_data_iterator, model,
                                    iteration, process_non_loss_data_func, config,
@@ -583,10 +635,10 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         if get_num_microbatches() != num_microbatches and iteration != 0:
             assert get_num_microbatches() > num_microbatches, \
                 "number of microbatches should be increasing due to batch size rampup"
-            save_checkpoint_and_time(iteration, model, optimizer,
-                                     opt_param_scheduler,
-                                     num_floating_point_operations_so_far,
-                                     checkpointing_context=None)
+            save_checkpoint_with_gmc_global_wt(iteration, model, optimizer,
+                                               opt_param_scheduler,
+                                               num_floating_point_operations_so_far,
+                                               checkpointing_context=None)
         num_microbatches = get_num_microbatches()
         update_num_microbatches(args.consumed_train_samples, consistency_check=True)
 
@@ -648,10 +700,16 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                 gc.collect()
             prefix = 'iteration {}'.format(iteration)
             timers('eval-time', log_level=0).start(barrier=True)
-            evaluate_and_print_results(prefix, forward_step_func,
-                                       valid_data_iterator, model,
-                                       iteration, process_non_loss_data_func,
-                                       config, False)
+            gmc_train_params = stash_gmc_train_params(model)
+            try:
+                copy_gmc_global_wt_to_params(model)
+                evaluate_and_print_results(prefix, forward_step_func,
+                                        valid_data_iterator, model,
+                                        iteration, process_non_loss_data_func,
+                                        config, False)
+            finally:
+                restore_gmc_train_params(gmc_train_params)
+                gmc_train_params = None
             eval_duration += timers('eval-time').elapsed()
             eval_iterations += args.eval_iters
             timers('eval-time').stop()
@@ -669,10 +727,10 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         if args.exit_signal_handler:
             signal_handler = get_signal_handler()
             if any(signal_handler.signals_received()):
-                save_checkpoint_and_time(iteration, model, optimizer,
-                                         opt_param_scheduler,
-                                         num_floating_point_operations_so_far,
-                                         checkpointing_context=None)
+                save_checkpoint_with_gmc_global_wt(iteration, model, optimizer,
+                                                   opt_param_scheduler,
+                                                   num_floating_point_operations_so_far,
+                                                   checkpointing_context=None)
                 update_save_checkpoint_chmod(config.save)
                 print_datetime('exiting program after receiving SIGTERM.')
                 exit = True
@@ -680,10 +738,10 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
 
         if args.save and args.save_interval and \
                 iteration % args.save_interval == 0:
-            save_checkpoint_and_time(iteration, model, optimizer,
-                                     opt_param_scheduler,
-                                     num_floating_point_operations_so_far,
-                                     checkpointing_context=None)
+            save_checkpoint_with_gmc_global_wt(iteration, model, optimizer,
+                                               opt_param_scheduler,
+                                               num_floating_point_operations_so_far,
+                                               checkpointing_context=None)
             update_save_checkpoint_chmod(config.save)
             saved_checkpoint = True
 
@@ -698,10 +756,10 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             done = done_npu.item()
             if done:
                 if not saved_checkpoint:
-                    save_checkpoint_and_time(iteration, model, optimizer,
-                                             opt_param_scheduler,
-                                             num_floating_point_operations_so_far,
-                                             checkpointing_context=None)
+                    save_checkpoint_with_gmc_global_wt(iteration, model, optimizer,
+                                                   opt_param_scheduler,
+                                                   num_floating_point_operations_so_far,
+                                                   checkpointing_context=None)
                     update_save_checkpoint_chmod(config.save)
                 print_datetime('exiting program after {} minutes'.format(train_time))
                 exit = True
@@ -710,10 +768,10 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         # Exiting based on iterations
         if args.exit_interval and iteration % args.exit_interval == 0:
             if args.save and not saved_checkpoint:
-                save_checkpoint_and_time(iteration, model, optimizer,
-                                         opt_param_scheduler,
-                                         num_floating_point_operations_so_far,
-                                         checkpointing_context=None)
+                save_checkpoint_with_gmc_global_wt(iteration, model, optimizer,
+                                                   opt_param_scheduler,
+                                                   num_floating_point_operations_so_far,
+                                                   checkpointing_context=None)
                 update_save_checkpoint_chmod(config.save)
             torch.distributed.barrier()
             print_datetime('exiting program at iteration {}'.format(iteration))
@@ -743,6 +801,8 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     # Close out pre-hooks if using distributed optimizer and overlapped param gather.
     if args.use_distributed_optimizer and args.overlap_param_gather:
         optimizer.disable_pre_hook()
+
+    copy_gmc_global_wt_to_params(model)
 
     # If any exit conditions (signal handler, duration, iterations) have been reached, exit.
     if exit:
